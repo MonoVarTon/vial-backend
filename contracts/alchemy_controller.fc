@@ -1,0 +1,184 @@
+;;
+;; Alchemy Controller — гейт минта поверх стокового nft-collection.fc
+;; DRAFT v0.1 — сверено с getgems-io/nft-contracts
+;;
+;; Роль: связать конкретную завершённую burn-сессию (подтверждённую Vault'ом
+;; push-сообщением) с конкретным mint-запросом от бэкенда, не давая забэкенду
+;; заминтить что-то без реального сожжения или заминтить одну сессию дважды.
+;;
+;; Controller должен быть owner_address стоковой коллекции nft-collection.fc —
+;; тогда её op==1 (deploy_nft_item) и op==2 (batch_deploy) физически недоступны
+;; никому, кроме этого контракта.
+;;
+;; НЕ СКОМПИЛИРОВАНО, НЕ ПРОТЕСТИРОВАНО, НЕ АУДИРОВАНО.
+;;
+
+;; Наши опкоды — та же схема, что в Vault
+int op::burn_session_ready() asm "0x88 PUSHINT";     ;; Vault -> Controller (push)
+int op::mint_synthesized() asm "0x99 PUSHINT";        ;; бэкенд -> Controller (после AI-пайплайна)
+
+;; Опкод стоковой коллекции getgems (nft-collection.fc, op==1 = deploy_nft_item)
+;; см. packages/contracts/sources/nft-collection.fc в getgems-io/nft-contracts
+int op::deploy_nft_item() asm "1 PUSHINT";
+
+int pending::status() asm "0 PUSHINT";
+int minted::status() asm "1 PUSHINT";
+
+;;
+;; Storage
+;;
+;; admin_address:MsgAddress        ;; авторизованный бэкенд-ключ
+;; vault_address:MsgAddress        ;; единственный источник, кому доверяем burn_session_ready
+;; collection_address:MsgAddress   ;; стоковый nft-collection.fc, чей owner — этот контракт
+;; next_item_index:uint64          ;; следующий свободный index для deploy_nft_item
+;; pending:(HashmapE 64 ^PendingRecord)  ;; session_id -> запись, ожидающая mint_synthesized
+;;
+;; PendingRecord:
+;;   initiator:MsgAddress
+;;   received_count:uint8
+;;   items:^(HashmapE 8 MsgAddress)   ;; для Lineage-трейта на стороне AI-воркера
+;;   status:uint1                     ;; 0 pending / 1 minted
+;;
+
+(slice, slice, slice, int, cell) load_data() inline {
+  var ds = get_data().begin_parse();
+  return (
+    ds~load_msg_addr(),  ;; admin_address
+    ds~load_msg_addr(),  ;; vault_address
+    ds~load_msg_addr(),  ;; collection_address
+    ds~load_uint(64),    ;; next_item_index
+    ds~load_dict()        ;; pending
+  );
+}
+
+() save_data(slice admin_address, slice vault_address, slice collection_address, int next_item_index, cell pending) impure inline {
+  set_data(begin_cell()
+    .store_slice(admin_address)
+    .store_slice(vault_address)
+    .store_slice(collection_address)
+    .store_uint(next_item_index, 64)
+    .store_dict(pending)
+    .end_cell());
+}
+
+() send_msg(slice to_address, int amount, int op, int query_id, builder payload, int send_mode) impure inline {
+  var msg = begin_cell()
+    .store_uint(0x10, 6)
+    .store_slice(to_address)
+    .store_coins(amount)
+    .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+    .store_uint(op, 32)
+    .store_uint(query_id, 64);
+  if (~ builder_null?(payload)) {
+    msg = msg.store_builder(payload);
+  }
+  send_raw_message(msg.end_cell(), send_mode);
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+  if (in_msg_body.slice_empty?()) { return (); }
+
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  if (flags & 1) { return (); }
+  slice sender_address = cs~load_msg_addr();
+
+  int op = in_msg_body~load_uint(32);
+  int query_id = in_msg_body~load_uint(64);
+
+  var (admin_address, vault_address, collection_address, next_item_index, pending) = load_data();
+
+  if (op == op::burn_session_ready()) {
+    ;; ДОВЕРЯЕМ только сообщению от самого Vault — это единственная защита от
+    ;; поддельного "session ready", раз синхронной проверки на TON не бывает
+    throw_unless(430, equal_slices(sender_address, vault_address));
+
+    int session_id = in_msg_body~load_uint(64);
+    slice initiator = in_msg_body~load_msg_addr();
+    int received_count = in_msg_body~load_uint(8);
+    cell items = in_msg_body~load_dict();
+
+    var (existing, already?) = pending.udict_get_ref?(64, session_id);
+    throw_unless(431, ~ already?); ;; сессия не должна была уже прийти раньше (защита от повторного push)
+
+    cell record = begin_cell()
+      .store_slice(initiator)
+      .store_uint(received_count, 8)
+      .store_dict(items)
+      .store_uint(pending::status(), 1)
+      .end_cell();
+    pending~udict_set_ref(64, session_id, record);
+
+    save_data(admin_address, vault_address, collection_address, next_item_index, pending);
+    return ();
+  }
+
+  if (op == op::mint_synthesized()) {
+    ;; вызывает ТОЛЬКО наш авторизованный бэкенд, после того как офчейн
+    ;; AI-пайплайн отработал и результат залит на IPFS
+    throw_unless(440, equal_slices(sender_address, admin_address));
+
+    int session_id = in_msg_body~load_uint(64);
+    slice recipient = in_msg_body~load_msg_addr();  ;; кошелёк юзера — новый владелец итоговой NFT
+    cell content = in_msg_body~load_ref();          ;; метаданные (IPFS-ссылка + Lineage), TEP-64
+
+    var (record_cell, found?) = pending.udict_get_ref?(64, session_id);
+    throw_unless(441, found?);                       ;; без реального burn_session_ready минт невозможен
+
+    slice rs = record_cell.begin_parse();
+    slice initiator = rs~load_msg_addr();
+    int received_count = rs~load_uint(8);
+    cell items = rs~load_dict();
+    int rec_status = rs~load_uint(1);
+    throw_unless(442, rec_status == pending::status()); ;; повторный минт этой же сессии запрещён
+
+    int item_index = next_item_index;
+
+    ;; Формат тела сверен построчно с nft-collection.fc::recv_internal (op==1) +
+    ;; nft-item.fc::recv_internal (ветка ~init?): первое сообщение НОВОМУ
+    ;; item-контракту обязано нести owner_address, затем ref на реальный TEP-64
+    ;; контент — nft-item.fc читает это САМ при инициализации. Отдельный
+    ;; transfer_ownership после деплоя НЕ нужен — owner выставляется сразу.
+    cell init_body = begin_cell()
+      .store_slice(recipient)  ;; owner_address нового NFT — сразу кошелёк юзера
+      .store_ref(content)       ;; TEP-64 метаданные (IPFS + Lineage)
+      .end_cell();
+
+    send_msg(collection_address, 0, op::deploy_nft_item(), query_id,
+      begin_cell()
+        .store_uint(item_index, 64)
+        .store_coins(50000000)   ;; 0.05 TON на сторедж нового item, см. min_tons_for_storage()
+        .store_ref(init_body),
+      64);
+
+    ;; закрываем сессию: помечаем minted, чтобы нельзя было прогнать mint_synthesized второй раз
+    cell closed_record = begin_cell()
+      .store_slice(initiator)
+      .store_uint(received_count, 8)
+      .store_dict(items)
+      .store_uint(minted::status(), 1)
+      .end_cell();
+    pending~udict_set_ref(64, session_id, closed_record);
+
+    save_data(admin_address, vault_address, collection_address, item_index + 1, pending);
+    return ();
+  }
+
+  throw(0xffff);
+}
+
+;;
+;; GET-методы
+;;
+
+(int, slice, int, int) get_pending(int session_id) method_id {
+  var (_, _, _, _, pending) = load_data();
+  var (record_cell, found?) = pending.udict_get_ref?(64, session_id);
+  throw_unless(404, found?);
+  slice rs = record_cell.begin_parse();
+  slice initiator = rs~load_msg_addr();
+  int received_count = rs~load_uint(8);
+  rs~load_dict(); ;; items — пропускаем в этом геттере, см. get_pending_item
+  int rec_status = rs~load_uint(1);
+  return (found?, initiator, received_count, rec_status);
+}

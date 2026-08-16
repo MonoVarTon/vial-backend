@@ -1,0 +1,56 @@
+# --- Секреты: НИКОГДА не коммитить ---
+.env
+.env.*
+!.env.example
+*.env
+secrets.json
+*.pem
+*.key
+*.p12
+mnemonic.txt
+seed.txt
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+ENV/
+
+# Тесты и кеши
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- FunC / TON ---
+*.fif
+*.boc
+build-contracts/
+
+# --- Редакторы и ОС ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Логи и временные файлы ---
+*.log
+logs/
+tmp/
+*.tmp

@@ -1,0 +1,238 @@
+;;
+;; Alchemy Vault — burn-intake contract
+;; DRAFT v0.2 — архитектура и стиль сверены с getgems-io/nft-contracts
+;; (packages/contracts/sources/nft-item.fc, nft-collection.fc, stdlib.fc)
+;;
+;; Изменения v0.1 -> v0.2:
+;;   - items теперь (HashmapE 8 MsgAddress) вместо хэш-дедупа — нужны реальные
+;;     адреса для (а) реклейма и (б) трейта Lineage, не только факт "было/не было"
+;;   - добавлен op::reclaim_stale_session — юзер сам возвращает зависшую сессию
+;;     после таймаута, без участия админа
+;;   - добавлено АКТИВНОЕ уведомление контроллера при готовности сессии —
+;;     TON не даёт синхронных cross-contract чтений, поэтому "pull" статуса
+;;     контроллером невозможен в принципе, только "push" от Vault
+;;
+;; НЕ СКОМПИЛИРОВАНО, НЕ ПРОТЕСТИРОВАНО, НЕ АУДИРОВАНО.
+;;
+
+int min_tons_for_storage() asm "50000000 PUSHINT"; ;; 0.05 TON — конвенция nft-item.fc
+int reclaim_timeout_seconds() asm "86400 PUSHINT"; ;; 24 часа
+
+;; Стандартные TEP-62 опкоды — переиспользуем как есть, не наши
+int op::transfer() asm "0x5fcc3d14 PUSHINT";
+int op::ownership_assigned() asm "0x05138d91 PUSHINT";
+
+;; Наши собственные опкоды, отдельное пространство имён, не TEP
+int op::reclaim_stale_session() asm "0x77 PUSHINT";
+int op::burn_session_ready() asm "0x88 PUSHINT";      ;; Vault -> Controller, push-уведомление
+
+int status::open() asm "0 PUSHINT";
+int status::ready() asm "1 PUSHINT";
+int status::minted() asm "2 PUSHINT";
+int status::reclaimed() asm "3 PUSHINT";
+
+;;
+;; Storage
+;;
+;; admin_address:MsgAddress        ;; аварийные/конфигурационные действия
+;; controller_address:MsgAddress   ;; получатель push-уведомления о готовой сессии
+;; sessions:(HashmapE 64 ^SessionRecord)
+;;
+;; SessionRecord (ref-ячейка):
+;;   initiator:MsgAddress
+;;   expected_count:uint8
+;;   received_count:uint8
+;;   status:uint2                  ;; 0 open / 1 ready / 2 minted / 3 reclaimed
+;;   created_at:uint32
+;;   items:^(HashmapE 8 MsgAddress) ;; index 0..3 -> реальный адрес сожжённой NFT
+;;
+
+(slice, slice, cell) load_data() inline {
+  var ds = get_data().begin_parse();
+  return (ds~load_msg_addr(), ds~load_msg_addr(), ds~load_dict());
+}
+
+() save_data(slice admin_address, slice controller_address, cell sessions) impure inline {
+  set_data(begin_cell()
+    .store_slice(admin_address)
+    .store_slice(controller_address)
+    .store_dict(sessions)
+    .end_cell());
+}
+
+(slice, int, int, int, int, cell) unpack_session(cell record) inline {
+  slice rs = record.begin_parse();
+  return (
+    rs~load_msg_addr(),  ;; initiator
+    rs~load_uint(8),      ;; expected_count
+    rs~load_uint(8),      ;; received_count
+    rs~load_uint(2),      ;; status
+    rs~load_uint(32),     ;; created_at
+    rs~load_dict()        ;; items
+  );
+}
+
+cell pack_session(slice initiator, int expected_count, int received_count, int status, int created_at, cell items) inline {
+  return begin_cell()
+    .store_slice(initiator)
+    .store_uint(expected_count, 8)
+    .store_uint(received_count, 8)
+    .store_uint(status, 2)
+    .store_uint(created_at, 32)
+    .store_dict(items)
+    .end_cell();
+}
+
+() send_msg(slice to_address, int amount, int op, int query_id, builder payload, int send_mode) impure inline {
+  var msg = begin_cell()
+    .store_uint(0x10, 6) ;; nobounce, same idiom as nft-item.fc
+    .store_slice(to_address)
+    .store_coins(amount)
+    .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+    .store_uint(op, 32)
+    .store_uint(query_id, 64);
+  if (~ builder_null?(payload)) {
+    msg = msg.store_builder(payload);
+  }
+  send_raw_message(msg.end_cell(), send_mode);
+}
+
+;; линейный скан на дубли — максимум 4 элемента в сессии, дёшево на TVM
+int session_has_item?(cell items, int received_count, slice candidate) inline {
+  int j = 0;
+  int dup = 0;
+  while (j < received_count) {
+    var (existing, found?) = items.udict_get?(8, j);
+    if (found? & equal_slices(existing, candidate)) {
+      dup = 1;
+    }
+    j += 1;
+  }
+  return dup;
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+  if (in_msg_body.slice_empty?()) { return (); } ;; голый topup — тихо принимаем
+
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  if (flags & 1) { return (); } ;; bounced — игнор
+  slice sender_address = cs~load_msg_addr();
+
+  int op = in_msg_body~load_uint(32);
+  int query_id = in_msg_body~load_uint(64);
+
+  if (op == op::ownership_assigned()) {
+    ;; sender_address здесь = адрес контракта САМОЙ сжигаемой NFT
+    slice prev_owner = in_msg_body~load_msg_addr();
+
+    ;; --- наша схема payload, НЕ часть стандарта TEP-62 ---
+    ;; alchemy_burn_payload#_ session_id:uint64 expected_count:uint8 = BurnPayload;
+    int session_id = in_msg_body~load_uint(64);
+    int declared_expected = in_msg_body~load_uint(8);
+    throw_unless(410, (declared_expected >= 2) & (declared_expected <= 4));
+
+    var (admin_address, controller_address, sessions) = load_data();
+    var (session_cell, session_found) = sessions.udict_get_ref?(64, session_id);
+    int now = now();
+
+    slice initiator = prev_owner;
+    int expected_count = declared_expected;
+    int received_count = 0;
+    int session_status = status::open();
+    int created_at = now;
+    cell items = new_dict();
+
+    if (session_found) {
+      (initiator, expected_count, received_count, session_status, created_at, items) = unpack_session(session_cell);
+      throw_unless(411, equal_slices(initiator, prev_owner));   ;; нельзя подселиться в чужую сессию
+      throw_unless(412, session_status == status::open());      ;; сессия ещё открыта
+      throw_unless(413, received_count < expected_count);       ;; не переполняем
+      throw_unless(414, ~ session_has_item?(items, received_count, sender_address)); ;; та же NFT дважды — запрещено
+    }
+
+    items~udict_set(8, received_count, sender_address);
+    received_count += 1;
+
+    if (received_count == expected_count) {
+      session_status = status::ready();
+      ;; TON не даёт контроллеру синхронно прочитать наш стейт — уведомляем сами,
+      ;; пересылаем тот же items-словарь как есть, не пересериализуем
+      send_msg(controller_address, 0, op::burn_session_ready(), query_id,
+        begin_cell()
+          .store_uint(session_id, 64)
+          .store_slice(initiator)
+          .store_uint(received_count, 8)
+          .store_dict(items),
+        64); ;; carry remaining value of this incoming message onward
+    }
+
+    sessions~udict_set_ref(64, session_id,
+      pack_session(initiator, expected_count, received_count, session_status, created_at, items));
+    save_data(admin_address, controller_address, sessions);
+    return ();
+  }
+
+  if (op == op::reclaim_stale_session()) {
+    int session_id = in_msg_body~load_uint(64);
+    var (admin_address, controller_address, sessions) = load_data();
+    var (session_cell, found?) = sessions.udict_get_ref?(64, session_id);
+    throw_unless(420, found?);
+    var (initiator, expected_count, received_count, session_status, created_at, items) = unpack_session(session_cell);
+
+    throw_unless(421, equal_slices(sender_address, initiator));            ;; только сам инициатор
+    throw_unless(422, session_status == status::open());                  ;; нельзя реклеймить ready/minted
+    throw_unless(423, (now() - created_at) >= reclaim_timeout_seconds()); ;; не раньше таймаута
+
+    ;; TODO(review): грубое деление остатка баланса на исходящие сообщения.
+    ;; Нужен точный расчёт по образцу rest_amount в nft-item.fc::transfer_ownership
+    ;; (min_tons_for_storage + fwd_fees), это приближение для черновика.
+    int gas_per_item = (my_balance - min_tons_for_storage()) / (received_count + 1);
+    throw_unless(424, gas_per_item > 0);
+
+    int i = 0;
+    while (i < received_count) {
+      var (item_addr, item_found) = items.udict_get?(8, i);
+      if (item_found) {
+        send_msg(item_addr, gas_per_item, op::transfer(), 0,
+          begin_cell()
+            .store_slice(initiator)     ;; new_owner_address — возвращаем как было
+            .store_slice(my_address())  ;; response_destination
+            .store_int(0, 1)            ;; custom_payload flag = 0
+            .store_coins(0),            ;; forward_amount = 0
+          1);
+      }
+      i += 1;
+    }
+
+    sessions~udict_set_ref(64, session_id,
+      pack_session(initiator, expected_count, received_count, status::reclaimed(), created_at, items));
+    save_data(admin_address, controller_address, sessions);
+    return ();
+  }
+
+  throw(0xffff); ;; неизвестный опкод — падаем громко
+}
+
+;;
+;; GET-методы
+;;
+
+(int, slice, int, int, int, int) get_session(int session_id) method_id {
+  var (_, _, sessions) = load_data();
+  var (session_cell, found?) = sessions.udict_get_ref?(64, session_id);
+  throw_unless(404, found?);
+  var (initiator, expected_count, received_count, status, created_at, _) = unpack_session(session_cell);
+  return (found?, initiator, expected_count, received_count, status, created_at);
+}
+
+(int, slice) get_session_item(int session_id, int index) method_id {
+  var (_, _, sessions) = load_data();
+  var (session_cell, found?) = sessions.udict_get_ref?(64, session_id);
+  throw_unless(404, found?);
+  var (_, _, received_count, _, _, items) = unpack_session(session_cell);
+  throw_unless(405, index < received_count);
+  var (item_slice, item_found) = items.udict_get?(8, index);
+  throw_unless(406, item_found);
+  return (item_found, item_slice);
+}

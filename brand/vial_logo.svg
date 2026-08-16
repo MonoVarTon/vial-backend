@@ -1,0 +1,26 @@
+<svg width="640" height="360" viewBox="0 0 640 360" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+<stop offset="0%" stop-color="#7FA89C"/>
+<stop offset="100%" stop-color="#453D63"/>
+</linearGradient>
+</defs>
+
+<rect x="0" y="0" width="640" height="360" fill="url(#bg)"/>
+
+<!-- капля-персонаж, левая часть -->
+<g transform="translate(60, 70)">
+<ellipse cx="115" cy="225" rx="88" ry="15" fill="#000000" opacity="0.12"/>
+<path d="M 40 200 C 8 198, -8 158, -6 128 C -4 90, 22 45, 72 28 C 84 24, 104 24, 116 28 C 158 42, 190 88, 190 128 C 192 162, 172 198, 132 200 C 104 205, 66 205, 40 200 Z" fill="#FFFFFF"/>
+<path d="M78 27 C 92 4, 104 -10, 111 -18" stroke="#FFFFFF" stroke-width="7" fill="none" stroke-linecap="round"/>
+<circle cx="115" cy="-24" r="12" fill="#E8C97A"/>
+<ellipse cx="80" cy="105" rx="9" ry="12" fill="#453D63"/>
+<ellipse cx="140" cy="105" rx="9" ry="12" fill="#453D63"/>
+<path d="M88 138 Q112 150 136 138" stroke="#453D63" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.75"/>
+</g>
+
+<!-- словесный товарный знак, правая часть -->
+<text x="330" y="185" font-size="72" font-weight="700" fill="#FFFFFF" font-family="Arial, Helvetica, sans-serif" letter-spacing="1">Vial</text>
+<text x="332" y="220" font-size="20" fill="#EDE7DA" font-family="Arial, Helvetica, sans-serif" opacity="0.85">AI-alchemy for your NFTs</text>
+
+</svg>
