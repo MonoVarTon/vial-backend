@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Vial</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://unpkg.com/@tonconnect/ui@2.0.9/dist/tonconnect-ui.min.js"></script>
+<style>
+  :root {
+    --ink: #1C1826;
+    --ink-2: #242030;
+    --line: #2E2839;
+    --line-2: #3A3446;
+    --parchment: #EDE7DA;
+    --muted: #8A8578;
+    --gold: #E8C97A;
+    --gold-ink: #2A2418;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--parchment);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 0.5px solid var(--line);
+  }
+  .wordmark { font-size: 15px; font-weight: 500; letter-spacing: 1.5px; }
+  .addr { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
+  .stage { padding: 18px 18px 8px; display: flex; flex-direction: column; align-items: center; }
+  .status { color: var(--muted); font-size: 13px; margin-top: 4px; text-align: center; }
+  .tier { color: var(--gold); font-size: 12px; margin-top: 6px; min-height: 16px; font-family: ui-monospace, monospace; }
+  .section { padding: 12px 18px 0; flex: 1; }
+  .label { color: var(--muted); font-size: 11px; letter-spacing: 1px; margin-bottom: 10px; }
+  #grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .card {
+    padding: 0; border-radius: 10px; border: 2px solid transparent;
+    background: var(--ink-2); cursor: pointer; aspect-ratio: 1;
+    position: relative; overflow: hidden; transition: border-color .15s, opacity .15s;
+  }
+  .card.on { border-color: var(--gold); }
+  .card.dim { opacity: .4; }
+  .card img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .card .nm {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: rgba(0,0,0,.6); font-size: 9px; padding: 2px 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .actions { padding: 16px 18px 22px; }
+  button.main {
+    width: 100%; height: 46px; border-radius: 12px; border: none;
+    background: var(--line); color: #6B6478;
+    font-size: 15px; font-weight: 500; cursor: not-allowed;
+    font-family: inherit; transition: background .15s, color .15s;
+  }
+  button.main.on { background: var(--gold); color: var(--gold-ink); cursor: pointer; }
+  .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 32px 12px; line-height: 1.6; }
+  .err { color: #E08A7A; font-size: 13px; text-align: center; padding: 12px; }
+  #connect-slot { padding: 0 18px 18px; }
+  .spin { animation: sp 1s linear infinite; display: inline-block; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="wordmark">VIAL</span>
+  <span class="addr" id="addr"></span>
+</header>
+
+<div class="stage">
+  <svg width="150" height="150" viewBox="0 0 200 200" role="img" aria-labelledby="vt">
+    <title id="vt">Флакон, наполняющийся цветом выбранных NFT</title>
+    <defs>
+      <linearGradient id="vfill" x1="0" y1="0" x2="0" y2="1">
+        <stop id="vtop" offset="0%" stop-color="#3A3446"/>
+        <stop id="vbot" offset="100%" stop-color="#26212F"/>
+      </linearGradient>
+      <clipPath id="vbody">
+        <path d="M35 150 C33 100, 60 55, 100 55 C140 55, 167 100, 165 150 C165 158, 140 162, 100 162 C60 162, 35 158, 35 150 Z"/>
+      </clipPath>
+    </defs>
+    <ellipse cx="100" cy="168" rx="62" ry="8" fill="#000" opacity="0.25"/>
+    <ellipse cx="30" cy="124" rx="11" ry="14" fill="#2E2839"/>
+    <ellipse cx="170" cy="124" rx="11" ry="14" fill="#2E2839"/>
+    <path d="M35 150 C33 100, 60 55, 100 55 C140 55, 167 100, 165 150 C165 158, 140 162, 100 162 C60 162, 35 158, 35 150 Z" fill="#242030" stroke="#3A3446" stroke-width="1.5"/>
+    <g clip-path="url(#vbody)">
+      <rect id="liquid" x="0" y="162" width="200" height="0" fill="url(#vfill)" style="transition: y .3s, height .3s"/>
+    </g>
+    <ellipse cx="76" cy="88" rx="24" ry="14" fill="#fff" opacity="0.16" transform="rotate(-20 76 88)"/>
+    <path d="M96 57 C88 40, 72 30, 60 26" stroke="#4A4358" stroke-width="4" fill="none" stroke-linecap="round"/>
+    <circle id="orb" cx="57" cy="24" r="7" fill="#3A3446"/>
+    <circle cx="84" cy="108" r="4" fill="#15121C"/>
+    <circle cx="116" cy="108" r="4" fill="#15121C"/>
+    <path d="M92 124 Q100 130 108 124" stroke="#15121C" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  </svg>
+  <div class="status" id="status">Подключите кошелёк</div>
+  <div class="tier" id="tier"></div>
+</div>
+
+<div id="connect-slot"></div>
+
+<div class="section">
+  <div class="label">ВАШИ NFT</div>
+  <div id="grid"></div>
+  <div id="msg"></div>
+</div>
+
+<div class="actions">
+  <button class="main" id="burn" disabled>Сжечь</button>
+</div>
+
+<script>
+const BACKEND = "https://vial-backend.onrender.com";
+const MANIFEST = BACKEND + "/tonconnect-manifest.json";
+
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+let ui = null, wallet = null, items = [], sel = new Set(), busy = false;
+
+function initTon() {
+  if (!window.TON_CONNECT_UI) {
+    document.getElementById("msg").innerHTML =
+      '<div class="err">Не удалось загрузить TonConnect. Проверьте соединение и откройте заново.</div>';
+    return;
+  }
+  ui = new window.TON_CONNECT_UI.TonConnectUI({
+    manifestUrl: MANIFEST,
+    buttonRootId: "connect-slot"
+  });
+  ui.onStatusChange(w => {
+    wallet = w;
+    if (w) {
+      const a = w.account.address;
+      document.getElementById("addr").textContent = a.slice(0, 4) + "…" + a.slice(-4);
+      loadNfts(a);
+    } else {
+      document.getElementById("addr").textContent = "";
+      items = []; sel.clear(); render();
+      document.getElementById("status").textContent = "Подключите кошелёк";
+    }
+  });
+}
+
+async function loadNfts(address) {
+  const grid = document.getElementById("grid");
+  const msg = document.getElementById("msg");
+  grid.innerHTML = "";
+  msg.innerHTML = '<div class="empty"><span class="spin">◠</span> Загружаем ваши NFT…</div>';
+
+  try {
+    const headers = {};
+    if (tg && tg.initData) headers["X-Telegram-Init-Data"] = tg.initData;
+
+    const r = await fetch(BACKEND + "/api/nfts?address=" + encodeURIComponent(address), { headers });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+
+    items = data.items || [];
+    msg.innerHTML = items.length ? "" :
+      '<div class="empty">В кошельке нет подходящих NFT.<br>Нужно минимум две.</div>';
+    render();
+  } catch (e) {
+    msg.innerHTML = '<div class="err">Не удалось загрузить NFT: ' + e.message +
+      '<br>Потяните вниз, чтобы обновить.</div>';
+  }
+}
+
+function render() {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+
+  items.forEach((it, i) => {
+    const b = document.createElement("button");
+    b.className = "card" + (sel.has(i) ? " on" : "") + (sel.size >= 4 && !sel.has(i) ? " dim" : "");
+    b.setAttribute("aria-label", it.name || "NFT");
+    b.setAttribute("aria-pressed", sel.has(i) ? "true" : "false");
+    const img = it.image ? '<img src="' + it.image + '" alt="" loading="lazy">' : "";
+    b.innerHTML = img + '<div class="nm">' + (it.name || "—") + "</div>";
+    b.onclick = () => {
+      if (busy) return;
+      if (sel.has(i)) sel.delete(i);
+      else if (sel.size < 4) sel.add(i);
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+      render();
+    };
+    grid.appendChild(b);
+  });
+
+  const picked = [...sel].map(i => items[i]);
+  const level = (picked.length / 4) * 107;
+  const liquid = document.getElementById("liquid");
+  liquid.setAttribute("y", 162 - level);
+  liquid.setAttribute("height", level);
+
+  const tierEl = document.getElementById("tier");
+  if (picked.length) {
+    const cols = picked.map(p => p.color || [58, 52, 70]);
+    const avg = [0, 1, 2].map(k => Math.round(cols.reduce((s, c) => s + c[k], 0) / cols.length));
+    const lift = avg.map(v => Math.min(255, Math.round(v * 1.25 + 20)));
+    document.getElementById("vtop").setAttribute("stop-color", "rgb(" + lift.join(",") + ")");
+    document.getElementById("vbot").setAttribute("stop-color", "rgb(" + avg.map(v => Math.round(v * 0.55)).join(",") + ")");
+
+    const score = Math.round(picked.reduce((s, p) => s + (p.score || 0), 0) / picked.length);
+    const floor = score >= 80 ? "Rare" : score >= 50 ? "Uncommon" : "Common";
+    tierEl.textContent = "оценка " + score + " → не ниже " + floor;
+    document.getElementById("orb").setAttribute("fill", picked.length >= 2 ? "#E8C97A" : "#3A3446");
+  } else {
+    tierEl.textContent = "";
+    document.getElementById("orb").setAttribute("fill", "#3A3446");
+  }
+
+  const st = document.getElementById("status");
+  if (!wallet) st.textContent = "Подключите кошелёк";
+  else if (!items.length) st.textContent = "Нет подходящих NFT";
+  else if (picked.length === 0) st.textContent = "Выберите 2–4 NFT";
+  else if (picked.length === 1) st.textContent = "Нужна ещё хотя бы одна";
+  else st.textContent = "Выбрано " + picked.length + " — можно сжигать";
+
+  const btn = document.getElementById("burn");
+  const ok = picked.length >= 2 && !busy;
+  btn.className = "main" + (ok ? " on" : "");
+  btn.disabled = !ok;
+  btn.textContent = busy ? "Отправляем…" : ok ? "Сжечь " + picked.length + " и получить новую" : "Сжечь";
+}
+
+document.getElementById("burn").onclick = async () => {
+  if (busy || sel.size < 2 || !wallet) return;
+
+  const picked = [...sel].map(i => items[i]);
+  const st = document.getElementById("status");
+
+  if (tg && tg.showConfirm) {
+    const ok = await new Promise(res => tg.showConfirm(
+      "Сжечь " + picked.length + " NFT? Вернуть их будет нельзя.", res));
+    if (!ok) return;
+  }
+
+  busy = true; render();
+
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (tg && tg.initData) headers["X-Telegram-Init-Data"] = tg.initData;
+
+    const prep = await fetch(BACKEND + "/api/burn/prepare", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        owner: wallet.account.address,
+        nfts: picked.map(p => p.address)
+      })
+    });
+    if (!prep.ok) throw new Error("Сервер отказал: HTTP " + prep.status);
+    const plan = await prep.json();
+
+    const res = await ui.sendTransaction({
+      validUntil: Math.floor(Date.now() / 1000) + 360,
+      messages: plan.messages
+    });
+
+    if (res) {
+      st.textContent = "Отправлено. Новая NFT придёт через 30–60 секунд.";
+      sel.clear();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+      setTimeout(() => loadNfts(wallet.account.address), 8000);
+    }
+  } catch (e) {
+    st.textContent = "Не отправилось: " + (e.message || "отмена");
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+  } finally {
+    busy = false; render();
+  }
+};
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initTon);
+else initTon();
+</script>
+</body>
+</html>
